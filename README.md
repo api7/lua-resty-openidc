@@ -427,7 +427,8 @@ Currently up to four caches are used
   token and cache segment are coalesced within an NGINX instance. One
   request calls the introspection endpoint while the others wait for and
   share its result, including endpoint failures and responses without an
-  expiry claim.
+  expiry claim. Setting `introspection_cache_ignore` disables both caching
+  and request coalescing.
 * the cache named `jwt_verification` stores the result of JWT
   verification.  Cache items expire when the corresponding token
   expires. Tokens with unknown expiry are not cached for two
