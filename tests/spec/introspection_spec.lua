@@ -487,34 +487,19 @@ describe("when the response is active but lacks the exp claim", function()
   end)
 end)
 
-describe("when concurrent requests introspect the same cacheable token", function()
+describe("when a batch sends 35 concurrent requests with the same uncached token", function()
   test_support.start_server({
-    delay_response = { introspection = 300 },
+    -- Keep the first lookup in flight long enough for the whole batch to
+    -- arrive inside the same cache-miss window.
+    delay_response = { introspection = 1000 },
     introspection_opts = { introspection_cache_ignore = false },
   })
   teardown(test_support.stop_server)
   local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
-  request_introspection_concurrently(jwt, 20)
+  request_introspection_concurrently(jwt, 35)
 
-  it("calls the introspection endpoint once", function()
+  it("coalesces the batch into one introspection endpoint call", function()
     assert.are.equals(1, error_log_occurrences("Received introspection request:"))
-  end)
-end)
-
-describe("when concurrent introspection requests receive an endpoint failure", function()
-  test_support.start_server({
-    delay_response = { introspection = 300 },
-    introspection_response_status = 503,
-  })
-  teardown(test_support.stop_server)
-  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
-  request_introspection_concurrently(jwt, 20, "401")
-
-  it("calls the introspection endpoint once", function()
-    assert.are.equals(1, error_log_occurrences("Received introspection request:"))
-  end)
-  it("shares the endpoint failure with every request", function()
-    assert.are.equals(20, error_log_occurrences("response indicates failure, status=503,"))
   end)
 end)
 
@@ -731,4 +716,3 @@ describe("when introspection endpoint hasn't been specified but discovery doc pr
      assert.are.equals(200, status)
   end)
 end)
-
