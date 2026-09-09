@@ -1,6 +1,9 @@
 09/09/2026
 - coalesce concurrent introspection cache misses for the same token, allowing
   waiting requests to share successful and failed results
+- return the introspection endpoint HTTP status as the third result from
+  introspect, allowing callers to distinguish endpoint failures from invalid
+  tokens
 
 09/05/2026
 - propagate session destroy and closed-mode revocation-store failures from

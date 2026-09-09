@@ -1004,18 +1004,18 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
   local json
   json, err = openidc_parse_json_response(res, ignore_body_on_success, expected_status)
   if err then
-    return nil, err
+    return nil, err, res.status
   end
   if ep_name == "token" and opts.use_dpop then
     err = openidc_validate_dpop_token_response(json)
     if err then
-      return nil, err
+      return nil, err, res.status
     end
     if response_dpop_nonce then
       json._dpop_nonce = response_dpop_nonce
     end
   end
-  return json, nil
+  return json, nil, res.status
 end
 
 -- computes access_token expires_in value (in seconds)
@@ -2384,17 +2384,18 @@ local function introspect_access_token(opts, access_token)
     return nil, err
   end
   local json
-  json, err = openidc.call_token_endpoint(opts, introspection_endpoint, body, opts.introspection_endpoint_auth_method, "introspection")
+  local status
+  json, err, status = openidc.call_token_endpoint(opts, introspection_endpoint, body, opts.introspection_endpoint_auth_method, "introspection")
 
   if not json then
-    return json, err
+    return json, err, status
   end
 
   -- check if negative cache should be in use
   local introspection_enable_negative_cache = opts.introspection_enable_negative_cache or false
   if not json.active and not introspection_enable_negative_cache then
     err = "invalid token"
-    return json, err
+    return json, err, status
   end
 
   -- cache the results
@@ -2421,7 +2422,7 @@ local function introspect_access_token(opts, access_token)
     err = "invalid token"
   end
 
-  return json, err
+  return json, err, status
 end
 
 local function decode_cached_introspection(value)
@@ -2438,7 +2439,7 @@ end
 local function acquire_introspection_lock(dict, key, timeout, exptime)
   local ok, err = dict:add(key, true, exptime)
   if ok then
-    return true
+    return true, nil, false
   end
   if err ~= "exists" then
     return nil, err
@@ -2453,7 +2454,7 @@ local function acquire_introspection_lock(dict, key, timeout, exptime)
 
     ok, err = dict:add(key, true, exptime)
     if ok then
-      return true
+      return true, nil, true
     end
     if err ~= "exists" then
       return nil, err
@@ -2503,8 +2504,9 @@ function openidc.introspect(opts)
   end
 
   local locked
-  locked, err = acquire_introspection_lock(introspection_cache, lock_key,
-                                           lock_timeout, lock_exptime)
+  local waited
+  locked, err, waited = acquire_introspection_lock(introspection_cache, lock_key,
+                                                   lock_timeout, lock_exptime)
   if not locked then
     return nil, "failed to acquire introspection lock: " .. err
   end
@@ -2521,17 +2523,18 @@ function openidc.introspect(opts)
   -- failures) are published briefly so requests that started during the same
   -- in-flight lookup can share the outcome. Requests that start after the
   -- lookup completed do not reuse this record.
-  local completed_value = introspection_cache:get(result_key)
+  local completed_value = waited and introspection_cache:get(result_key)
   if completed_value then
     local completed = cjson_s.decode(completed_value)
     if completed and completed.completed_at >= started_at then
       introspection_cache:delete(lock_key)
-      return completed.json, completed.err
+      return completed.json, completed.err, completed.status
     end
   end
 
   local json
-  json, err = introspect_access_token(opts, access_token)
+  local status
+  json, err, status = introspect_access_token(opts, access_token)
 
   -- A cacheable response is already visible to waiters. Publish only outcomes
   -- that the regular introspection cache did not retain.
@@ -2540,6 +2543,7 @@ function openidc.introspect(opts)
       completed_at = ngx.now(),
       json = json,
       err = err,
+      status = status,
     })
     if completed then
       local result_ttl = math.max(lock_timeout, 1)
@@ -2553,7 +2557,7 @@ function openidc.introspect(opts)
   end
 
   introspection_cache:delete(lock_key)
-  return json, err
+  return json, err, status
 
 end
 
