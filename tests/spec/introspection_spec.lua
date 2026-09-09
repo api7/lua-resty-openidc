@@ -26,8 +26,7 @@ local function error_log_occurrences(s)
   end
 end
 
-local function request_introspection_concurrently(jwt, count, expected_status)
-  expected_status = expected_status or "200"
+local function collect_introspection_statuses_concurrently(jwt, count)
   local output = "/tmp/introspection-statuses"
   os.remove(output)
   local command = "seq 1 " .. count .. " | xargs -P " .. count ..
@@ -39,11 +38,19 @@ local function request_introspection_concurrently(jwt, count, expected_status)
 
   local statuses = test_support.load(output)
   local seen = 0
+  local counts = {}
   for status in statuses:gmatch("%d+") do
-    assert.are.equals(expected_status, status)
+    counts[status] = (counts[status] or 0) + 1
     seen = seen + 1
   end
   assert.are.equals(count, seen)
+  return counts
+end
+
+local function request_introspection_concurrently(jwt, count, expected_status)
+  expected_status = expected_status or "200"
+  local counts = collect_introspection_statuses_concurrently(jwt, count)
+  assert.are.equals(count, counts[expected_status])
 end
 
 local legacy_introspection_body_auth_warning = "introspection_endpoint_auth_method is not set; " ..
@@ -65,7 +72,7 @@ describe("when the introspection endpoint is invoked", function()
     end)
   end)
   describe("with a bearer token", function()
-    local _, status = http.request({
+    local _, status, headers = http.request({
       url = "http://127.0.0.1/introspect",
       headers = { authorization = "Bearer " .. jwt }
     })
@@ -86,6 +93,9 @@ describe("when the introspection endpoint is invoked", function()
     end)
     it("the response is valid", function()
       assert.are.equals(200, status)
+    end)
+    it("returns the introspection endpoint status", function()
+      assert.are.equals("200", headers["x-introspection-endpoint-status"])
     end)
   end)
 end)
@@ -460,7 +470,7 @@ describe("when the response is inactive", function()
   })
   teardown(test_support.stop_server)
   local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
-  local _, status = http.request({
+  local _, status, headers = http.request({
     url = "http://127.0.0.1/introspect",
     headers = { authorization = "Bearer " .. jwt }
   })
@@ -469,6 +479,12 @@ describe("when the response is inactive", function()
   end)
   it("an error has been logged", function()
     assert.error_log_contains("Introspection error: invalid token")
+  end)
+  it("returns the successful introspection endpoint status", function()
+    assert.are.equals("200", headers["x-introspection-endpoint-status"])
+  end)
+  it("identifies the inactive token", function()
+    assert.matches('error="invalid_token"', headers["www-authenticate"])
   end)
 end)
 
@@ -524,6 +540,48 @@ describe("when concurrent requests introspect a response without an expiry", fun
   end)
 end)
 
+describe("when a batch receives an introspection endpoint failure", function()
+  test_support.start_server({
+    delay_response = { introspection = 1000 },
+    introspection_response_status = 503,
+    introspection_opts = { introspection_cache_ignore = false },
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  request_introspection_concurrently(jwt, 35, "503")
+
+  it("coalesces the batch into one introspection endpoint call", function()
+    assert.are.equals(1, error_log_occurrences("Received introspection request:"))
+  end)
+  it("shares the endpoint failure with every request", function()
+    assert.are.equals(35, error_log_occurrences(
+      "Introspection error: response indicates failure, status=503,"))
+  end)
+end)
+
+describe("when concurrent introspection lock acquisition times out", function()
+  test_support.start_server({
+    delay_response = { introspection = 1000 },
+    introspection_opts = {
+      introspection_cache_ignore = false,
+      introspection_lock_timeout = 0,
+    },
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  local statuses = collect_introspection_statuses_concurrently(jwt, 2)
+
+  it("returns the successful result to the lock owner", function()
+    assert.are.equals(1, statuses["200"])
+  end)
+  it("returns service unavailable to the request that cannot coordinate", function()
+    assert.are.equals(1, statuses["503"])
+  end)
+  it("does not send the timed-out request to the introspection endpoint", function()
+    assert.are.equals(1, error_log_occurrences("Received introspection request:"))
+  end)
+end)
+
 describe("when introspection endpoint is not resolvable", function()
   test_support.start_server({
     introspection_opts = {
@@ -536,8 +594,8 @@ describe("when introspection endpoint is not resolvable", function()
     url = "http://127.0.0.1/introspect",
     headers = { authorization = "Bearer " .. jwt }
   })
-  it("the response is invalid", function()
-    assert.are.equals(401, status)
+  it("the service is unavailable", function()
+    assert.are.equals(503, status)
   end)
   it("an error has been logged", function()
     assert.error_log_contains("Introspection error:.*foo.example.org could not be resolved.*")
@@ -557,8 +615,8 @@ describe("when introspection endpoint is not reachable", function()
     url = "http://127.0.0.1/introspect",
     headers = { authorization = "Bearer " .. jwt }
   })
-  it("the response is invalid", function()
-    assert.are.equals(401, status)
+  it("the service is unavailable", function()
+    assert.are.equals(503, status)
   end)
   it("an error has been logged", function()
     assert.error_log_contains("Introspection error:.*accessing introspection endpoint %(http://127.1.2.3/%) failed")
@@ -593,8 +651,8 @@ describe("when introspection endpoint is slow and a simple timeout is configured
     url = "http://127.0.0.1/introspect",
     headers = { authorization = "Bearer " .. jwt }
   })
-  it("the response is invalid", function()
-    assert.are.equals(401, status)
+  it("the service is unavailable", function()
+    assert.are.equals(503, status)
   end)
   it("an error has been logged", function()
     assert.error_log_contains("Introspection error:.*accessing introspection endpoint %(http://127.0.0.1/introspection%) failed: timeout")
@@ -614,8 +672,8 @@ describe("when introspection endpoint is slow and a table timeout is configured"
     url = "http://127.0.0.1/introspect",
     headers = { authorization = "Bearer " .. jwt }
   })
-  it("the response is invalid", function()
-    assert.are.equals(401, status)
+  it("the service is unavailable", function()
+    assert.are.equals(503, status)
   end)
   it("an error has been logged", function()
     assert.error_log_contains("Introspection error:.*accessing introspection endpoint %(http://127.0.0.1/introspection%) failed: timeout")
@@ -630,15 +688,42 @@ describe("when introspection endpoint sends a 4xx status", function()
   })
   teardown(test_support.stop_server)
   local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
-  local _, status = http.request({
+  local _, status, headers = http.request({
     url = "http://127.0.0.1/introspect",
     headers = { authorization = "Bearer " .. jwt }
   })
-  it("the response is invalid", function()
-    assert.are.equals(401, status)
+  it("the service is unavailable", function()
+    assert.are.equals(503, status)
   end)
   it("an error has been logged", function()
     assert.error_log_contains("Introspection error:.*response indicates failure, status=404,")
+  end)
+  it("returns the introspection endpoint status", function()
+    assert.are.equals("404", headers["x-introspection-endpoint-status"])
+  end)
+end)
+
+describe("when introspection endpoint sends a 503 status", function()
+  test_support.start_server({
+    introspection_response_status = 503,
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  local _, status, headers = http.request({
+    url = "http://127.0.0.1/introspect",
+    headers = { authorization = "Bearer " .. jwt }
+  })
+  it("the service is unavailable", function()
+    assert.are.equals(503, status)
+  end)
+  it("returns the introspection endpoint status", function()
+    assert.are.equals("503", headers["x-introspection-endpoint-status"])
+  end)
+  it("does not identify the token as invalid", function()
+    assert.is_nil(headers["www-authenticate"])
+  end)
+  it("an error has been logged", function()
+    assert.error_log_contains("Introspection error:.*response indicates failure, status=503,")
   end)
 end)
 
@@ -654,8 +739,8 @@ describe("when introspection endpoint doesn't return proper JSON", function()
     url = "http://127.0.0.1/introspect",
     headers = { authorization = "Bearer " .. jwt }
   })
-  it("the response is invalid", function()
-    assert.are.equals(401, status)
+  it("the service is unavailable", function()
+    assert.are.equals(503, status)
   end)
   it("an error has been logged", function()
     assert.error_log_contains("Introspection error: JSON decoding failed")
