@@ -3,6 +3,9 @@
   waiting requests to share successful and failed results
 - make introspection coordination honor explicit cache bypass and isolate
   temporary results and lock release by lock generation
+- return the introspection endpoint HTTP status as the third result from
+  introspect, allowing callers to distinguish endpoint failures from invalid
+  tokens
 
 09/05/2026
 - propagate session destroy and closed-mode revocation-store failures from

@@ -1004,18 +1004,18 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
   local json
   json, err = openidc_parse_json_response(res, ignore_body_on_success, expected_status)
   if err then
-    return nil, err
+    return nil, err, res.status
   end
   if ep_name == "token" and opts.use_dpop then
     err = openidc_validate_dpop_token_response(json)
     if err then
-      return nil, err
+      return nil, err, res.status
     end
     if response_dpop_nonce then
       json._dpop_nonce = response_dpop_nonce
     end
   end
-  return json, nil
+  return json, nil, res.status
 end
 
 -- computes access_token expires_in value (in seconds)
@@ -2384,17 +2384,18 @@ local function introspect_access_token(opts, access_token)
     return nil, err
   end
   local json
-  json, err = openidc.call_token_endpoint(opts, introspection_endpoint, body, opts.introspection_endpoint_auth_method, "introspection")
+  local status
+  json, err, status = openidc.call_token_endpoint(opts, introspection_endpoint, body, opts.introspection_endpoint_auth_method, "introspection")
 
   if not json then
-    return json, err
+    return json, err, status
   end
 
   -- check if negative cache should be in use
   local introspection_enable_negative_cache = opts.introspection_enable_negative_cache or false
   if not json.active and not introspection_enable_negative_cache then
     err = "invalid token"
-    return json, err
+    return json, err, status
   end
 
   -- cache the results
@@ -2421,7 +2422,7 @@ local function introspect_access_token(opts, access_token)
     err = "invalid token"
   end
 
-  return json, err
+  return json, err, status
 end
 
 local function decode_cached_introspection(value)
@@ -2438,7 +2439,7 @@ end
 local function acquire_introspection_lock(dict, key, owner, timeout, exptime)
   local ok, err = dict:add(key, owner, exptime)
   if ok then
-    return true
+    return true, nil, false
   end
   if err ~= "exists" then
     return nil, err
@@ -2549,17 +2550,22 @@ function openidc.introspect(opts)
         introspection_cache, result_key_prefix .. lock_owner,
         completed_value, math.max(lock_timeout, 1))
       release_introspection_lock(introspection_cache, lock_key, lock_owner)
-      return completed.json, completed.err
+      return completed.json, completed.err, completed.status
     end
   end
 
   local json
-  json, err = introspect_access_token(opts, access_token)
+  local status
+  json, err, status = introspect_access_token(opts, access_token)
 
   -- A cacheable response is already visible to waiters. Publish only outcomes
   -- that the regular introspection cache did not retain.
   if not introspection_cache:get(cache_key) then
-    local completed, encode_err = cjson_s.encode({ json = json, err = err })
+    local completed, encode_err = cjson_s.encode({
+      json = json,
+      err = err,
+      status = status,
+    })
     if completed then
       publish_introspection_result(
         introspection_cache, result_key_prefix .. lock_owner,
@@ -2570,7 +2576,7 @@ function openidc.introspect(opts)
   end
 
   release_introspection_lock(introspection_cache, lock_key, lock_owner)
-  return json, err
+  return json, err, status
 
 end
 

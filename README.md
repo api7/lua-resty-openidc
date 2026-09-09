@@ -623,7 +623,7 @@ http {
           }
 
           -- call introspect for OAuth 2.0 Bearer Access Token validation
-          local res, err = require("resty.openidc").introspect(opts)
+          local res, err, status = require("resty.openidc").introspect(opts)
 
           if err then
             ngx.status = 403
@@ -633,6 +633,8 @@ http {
 
           -- at this point res is a Lua table that represents the JSON
           -- object returned from the introspection/validation endpoint
+          -- status is the HTTP status returned by the introspection endpoint,
+          -- or nil when no HTTP response was received or a cached result was used
 
           --if res.scope ~= "edit" then
           --  ngx.exit(ngx.HTTP_FORBIDDEN)
@@ -736,7 +738,7 @@ http {
           }
 
           -- call introspect for OAuth 2.0 Bearer Access Token validation
-          local res, err = require("resty.openidc").introspect(opts)
+          local res, err, status = require("resty.openidc").introspect(opts)
 
           if err then
             ngx.status = 403
@@ -746,6 +748,8 @@ http {
 
           -- at this point res is a Lua table that represents the JSON
           -- object returned from the introspection/validation endpoint
+          -- status is the HTTP status returned by the introspection endpoint,
+          -- or nil when no HTTP response was received or a cached result was used
 
           --if res.scope ~= "edit" then
           --  ngx.exit(ngx.HTTP_FORBIDDEN)

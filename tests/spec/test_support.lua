@@ -96,6 +96,7 @@ local DEFAULT_UNAUTH_ACTION = "nil"
 local DEFAULT_SHARE_OIDC_OPTS = "false"
 
 local DEFAULT_DELAY_RESPONSE = "0"
+local DEFAULT_INTROSPECTION_RESPONSE_STATUS = "200"
 
 local DEFAULT_REVOCATION_TEST_ENABLED = "false"
 local DEFAULT_REVOCATION_FAIL_MODE = '"closed"'
@@ -536,6 +537,7 @@ http {
                 end
                 ngx.header.content_type = 'application/json;charset=UTF-8'
                 test_globals.delay(INTROSPECTION_DELAY_RESPONSE)
+                ngx.status = INTROSPECTION_HTTP_STATUS
                 ngx.say(test_globals.cjson.encode(INTROSPECTION_RESPONSE))
             }
         }
@@ -546,9 +548,27 @@ http {
                 if opts.decorate then
                   opts.http_request_decorator = test_globals.body_decorator
                 end
-                local json, err = test_globals.oidc.introspect(opts)
+                local json, err, endpoint_status = test_globals.oidc.introspect(opts)
+                if endpoint_status then
+                  ngx.header["X-Introspection-Endpoint-Status"] = endpoint_status
+                end
                 if err then
-                  ngx.status = 401
+                  -- A successful active=false response is an invalid token.
+                  -- Failures while contacting or coordinating access to the
+                  -- endpoint are temporary service failures instead.
+                  local service_unavailable = not json and (
+                    endpoint_status ~= nil or
+                    err:find("^accessing introspection endpoint") or
+                    err:find("^failed to acquire introspection lock")
+                  )
+                  if service_unavailable then
+                    ngx.status = 503
+                  else
+                    ngx.status = 401
+                    if json and json.active == false then
+                      ngx.header["WWW-Authenticate"] = 'Bearer error="invalid_token"'
+                    end
+                  end
                   ngx.log(ngx.ERR, "Introspection error: " .. err)
                 else
                   ngx.header.content_type = 'application/json;charset=UTF-8'
@@ -687,6 +707,7 @@ local function write_template(out, template, custom_config)
     :gsub("DISCOVERY_DELAY_RESPONSE", ((custom_config["delay_response"] or {}).discovery or DEFAULT_DELAY_RESPONSE))
     :gsub("USERINFO_DELAY_RESPONSE", ((custom_config["delay_response"] or {}).userinfo or DEFAULT_DELAY_RESPONSE))
     :gsub("INTROSPECTION_DELAY_RESPONSE", ((custom_config["delay_response"] or {}).introspection or DEFAULT_DELAY_RESPONSE))
+    :gsub("INTROSPECTION_HTTP_STATUS", custom_config["introspection_response_status"] or DEFAULT_INTROSPECTION_RESPONSE_STATUS)
     :gsub("REVOCATION_DELAY_RESPONSE", ((custom_config["delay_response"] or {}).revocation or DEFAULT_DELAY_RESPONSE))
     :gsub("JWK", custom_config["jwk"] or DEFAULT_JWK)
     :gsub("USERINFO", serpent.block(userinfo, {comment = false }))
@@ -733,6 +754,7 @@ end
 -- - remove_userinfo_claims is an array of claims to remove from the userinfo response
 -- - introspection_response is a table containing claims returned by
 --   the introspection endpoint
+-- - introspection_response_status is the HTTP status returned by the introspection endpoint
 -- - remove_introspection_claims is an array of claims to remove from the introspection response
 -- - introspection_opts is a table containing options that are accepted by oidc.introspect
 -- - remove_introspection_config_keys is an array of claims to remove from the introspection
