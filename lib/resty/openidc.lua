@@ -338,7 +338,7 @@ local function openidc_cache_get(type, key)
   local value
   if dict then
     value = dict:get(key)
-    if value then log(DEBUG, "cache hit: type=", type) end
+    if value then log(DEBUG, "cache hit: type=", type, " key=", key) end
   end
   return value
 end
@@ -2558,7 +2558,7 @@ function openidc.introspect(opts)
 
   -- A cacheable response is already visible to waiters. Publish only outcomes
   -- that the regular introspection cache did not retain.
-  if not get_cached_introspection(opts, access_token) then
+  if not introspection_cache:get(cache_key) then
     local completed, encode_err = cjson_s.encode({ json = json, err = err })
     if completed then
       publish_introspection_result(

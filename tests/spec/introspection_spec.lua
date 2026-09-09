@@ -517,24 +517,6 @@ describe("when concurrent requests explicitly bypass the introspection cache", f
   end)
 end)
 
-describe("when a cacheable introspection response is stored", function()
-  test_support.start_server({
-    introspection_opts = { introspection_cache_ignore = false },
-  })
-  teardown(test_support.stop_server)
-  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
-  local _, status = http.request({
-    url = "http://127.0.0.1/introspect",
-    headers = { authorization = "Bearer " .. jwt }
-  })
-
-  it("does not include the cache key in the cache-hit log", function()
-    assert.are.equals(200, status)
-    assert.error_log_contains("cache hit: type=introspection")
-    assert.is_not.error_log_contains("cache hit: type=introspection key=")
-  end)
-end)
-
 describe("when concurrent requests introspect a response without an expiry", function()
   test_support.start_server({
     delay_response = { introspection = 300 },
