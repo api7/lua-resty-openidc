@@ -503,10 +503,43 @@ describe("when a batch sends 35 concurrent requests with the same uncached token
   end)
 end)
 
+describe("when concurrent requests explicitly bypass the introspection cache", function()
+  test_support.start_server({
+    delay_response = { introspection = 300 },
+    introspection_opts = { introspection_cache_ignore = true },
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  request_introspection_concurrently(jwt, 10)
+
+  it("introspects every request independently", function()
+    assert.are.equals(10, error_log_occurrences("Received introspection request:"))
+  end)
+end)
+
+describe("when a cacheable introspection response is stored", function()
+  test_support.start_server({
+    introspection_opts = { introspection_cache_ignore = false },
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  local _, status = http.request({
+    url = "http://127.0.0.1/introspect",
+    headers = { authorization = "Bearer " .. jwt }
+  })
+
+  it("does not include the cache key in the cache-hit log", function()
+    assert.are.equals(200, status)
+    assert.error_log_contains("cache hit: type=introspection")
+    assert.is_not.error_log_contains("cache hit: type=introspection key=")
+  end)
+end)
+
 describe("when concurrent requests introspect a response without an expiry", function()
   test_support.start_server({
     delay_response = { introspection = 300 },
     remove_introspection_claims = { "exp" },
+    introspection_opts = { introspection_cache_ignore = false },
   })
   teardown(test_support.stop_server)
   local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
@@ -520,6 +553,56 @@ describe("when concurrent requests introspect a response without an expiry", fun
       headers = { authorization = "Bearer " .. jwt }
     })
     assert.are.equals(200, status)
+    assert.are.equals(2, error_log_occurrences("Received introspection request:"))
+  end)
+end)
+
+describe("when sequential non-cacheable requests have the same ngx.now value", function()
+  test_support.start_server({
+    fixed_ngx_now = 1000,
+    remove_introspection_claims = { "exp" },
+    introspection_opts = { introspection_cache_ignore = false },
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  local headers = { authorization = "Bearer " .. jwt }
+  local _, first_status = http.request({
+    url = "http://127.0.0.1/introspect",
+    headers = headers,
+  })
+  local _, second_status = http.request({
+    url = "http://127.0.0.1/introspect",
+    headers = headers,
+  })
+
+  it("does not share the first request's temporary result", function()
+    assert.are.equals(200, first_status)
+    assert.are.equals(200, second_status)
+    assert.are.equals(2, error_log_occurrences("Received introspection request:"))
+  end)
+end)
+
+describe("when an introspection outlasts its lock generation", function()
+  test_support.start_server({
+    delay_response = { introspection = 700 },
+    remove_introspection_claims = { "exp" },
+    introspection_opts = {
+      introspection_cache_ignore = false,
+      introspection_lock_exptime = 0.5,
+      introspection_lock_timeout = 0.1,
+    },
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  local curl = "curl -sS -o /dev/null -H 'Authorization: Bearer " .. jwt ..
+    "' http://127.0.0.1/introspect"
+  local command = curl .. " & first_pid=$!; sleep 0.55; " ..
+    curl .. " & second_pid=$!; sleep 0.25; " .. curl ..
+    "; wait $first_pid $second_pid"
+  local ok = os.execute(command)
+
+  it("keeps the replacement generation locked", function()
+    assert.truthy(ok == true or ok == 0)
     assert.are.equals(2, error_log_occurrences("Received introspection request:"))
   end)
 end)

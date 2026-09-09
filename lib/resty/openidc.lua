@@ -338,7 +338,7 @@ local function openidc_cache_get(type, key)
   local value
   if dict then
     value = dict:get(key)
-    if value then log(DEBUG, "cache hit: type=", type, " key=", key) end
+    if value then log(DEBUG, "cache hit: type=", type) end
   end
   return value
 end
@@ -2435,8 +2435,8 @@ local function decode_cached_introspection(value)
   return json, err
 end
 
-local function acquire_introspection_lock(dict, key, timeout, exptime)
-  local ok, err = dict:add(key, true, exptime)
+local function acquire_introspection_lock(dict, key, owner, timeout, exptime)
+  local ok, err = dict:add(key, owner, exptime)
   if ok then
     return true
   end
@@ -2444,6 +2444,7 @@ local function acquire_introspection_lock(dict, key, timeout, exptime)
     return nil, err
   end
 
+  local observed_owner = dict:get(key)
   local elapsed = 0
   local step = 0.001
   while elapsed < timeout do
@@ -2451,18 +2452,32 @@ local function acquire_introspection_lock(dict, key, timeout, exptime)
     ngx.sleep(step)
     elapsed = elapsed + step
 
-    ok, err = dict:add(key, true, exptime)
+    ok, err = dict:add(key, owner, exptime)
     if ok then
-      return true
+      return true, nil, observed_owner
     end
     if err ~= "exists" then
       return nil, err
     end
+    observed_owner = dict:get(key) or observed_owner
 
     step = math.min(step * 2, 0.5)
   end
 
   return nil, "timeout"
+end
+
+local function release_introspection_lock(dict, key, owner)
+  if dict:get(key) == owner then
+    dict:delete(key)
+  end
+end
+
+local function publish_introspection_result(dict, key, value, ttl)
+  local ok, err = dict:set(key, value, ttl)
+  if not ok then
+    log(WARN, "failed to publish introspection result: " .. err)
+  end
 end
 
 -- main routine for OAuth 2.0 token introspection
@@ -2472,6 +2487,10 @@ function openidc.introspect(opts)
   local access_token, err = openidc_get_bearer_access_token(opts)
   if access_token == nil then
     return nil, err
+  end
+
+  if opts.introspection_cache_ignore then
+    return introspect_access_token(opts, access_token)
   end
 
   -- avoid lock overhead for normal cache hits
@@ -2490,8 +2509,8 @@ function openidc.introspect(opts)
   local cache_key = get_introspection_cache_key(opts, access_token)
   local digest = b64url(openidc_sha256(cache_key))
   local lock_key = "openidc-introspection-lock:" .. digest
-  local result_key = "openidc-introspection-result:" .. digest
-  local started_at = ngx.now()
+  local result_key_prefix = "openidc-introspection-result:" .. digest .. ":"
+  local lock_owner = openidc_random_jti()
   local lock_timeout = opts.introspection_lock_timeout or 5
   local lock_exptime = opts.introspection_lock_exptime or 30
 
@@ -2503,8 +2522,9 @@ function openidc.introspect(opts)
   end
 
   local locked
-  locked, err = acquire_introspection_lock(introspection_cache, lock_key,
-                                           lock_timeout, lock_exptime)
+  local observed_owner
+  locked, err, observed_owner = acquire_introspection_lock(
+    introspection_cache, lock_key, lock_owner, lock_timeout, lock_exptime)
   if not locked then
     return nil, "failed to acquire introspection lock: " .. err
   end
@@ -2513,19 +2533,22 @@ function openidc.introspect(opts)
   -- waited for the lock.
   value = get_cached_introspection(opts, access_token)
   if value then
-    introspection_cache:delete(lock_key)
+    release_introspection_lock(introspection_cache, lock_key, lock_owner)
     return decode_cached_introspection(value)
   end
 
   -- Responses which cannot enter the regular cache (including endpoint
-  -- failures) are published briefly so requests that started during the same
-  -- in-flight lookup can share the outcome. Requests that start after the
-  -- lookup completed do not reuse this record.
-  local completed_value = introspection_cache:get(result_key)
-  if completed_value then
+  -- failures) are published briefly under the lock generation. Only requests
+  -- which observed that generation while waiting can share the outcome.
+  local completed_value = observed_owner and
+    introspection_cache:get(result_key_prefix .. observed_owner)
+  if completed_value and observed_owner then
     local completed = cjson_s.decode(completed_value)
-    if completed and completed.completed_at >= started_at then
-      introspection_cache:delete(lock_key)
+    if completed then
+      publish_introspection_result(
+        introspection_cache, result_key_prefix .. lock_owner,
+        completed_value, math.max(lock_timeout, 1))
+      release_introspection_lock(introspection_cache, lock_key, lock_owner)
       return completed.json, completed.err
     end
   end
@@ -2536,23 +2559,17 @@ function openidc.introspect(opts)
   -- A cacheable response is already visible to waiters. Publish only outcomes
   -- that the regular introspection cache did not retain.
   if not get_cached_introspection(opts, access_token) then
-    local completed, encode_err = cjson_s.encode({
-      completed_at = ngx.now(),
-      json = json,
-      err = err,
-    })
+    local completed, encode_err = cjson_s.encode({ json = json, err = err })
     if completed then
-      local result_ttl = math.max(lock_timeout, 1)
-      local ok, set_err = introspection_cache:set(result_key, completed, result_ttl)
-      if not ok then
-        log(WARN, "failed to publish introspection result: " .. set_err)
-      end
+      publish_introspection_result(
+        introspection_cache, result_key_prefix .. lock_owner,
+        completed, math.max(lock_timeout, 1))
     else
       log(WARN, "failed to encode introspection result: " .. encode_err)
     end
   end
 
-  introspection_cache:delete(lock_key)
+  release_introspection_lock(introspection_cache, lock_key, lock_owner)
   return json, err
 
 end
