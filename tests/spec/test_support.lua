@@ -74,6 +74,8 @@ local DEFAULT_INTROSPECTION_OPTS = {
   introspection_endpoint = "http://127.0.0.1/introspection",
   client_id = "client_id",
   client_secret = "client_secret",
+  -- Most specs inspect the outgoing request, so caching is opt-in in tests.
+  introspection_cache_ignore = true,
 }
 
 local DEFAULT_TOKEN_RESPONSE_EXPIRES_IN = "3600"
@@ -197,6 +199,7 @@ http {
     access_log /tmp/server/logs/access.log;
     lua_package_path '~/lua/?.lua;/tmp/server/conf/?.lua;;';
     lua_shared_dict discovery 1m;
+    lua_shared_dict introspection 1m;
     lua_shared_dict jwt_verification 1m;
     lua_shared_dict revocation_test 1m;
     init_by_lua_block {
