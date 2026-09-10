@@ -89,7 +89,7 @@ local supported_token_auth_methods = {
 }
 
 local openidc = {
-  _VERSION = "1.8.0"
+  _VERSION = "1.8.1"
 }
 openidc.__index = openidc
 
