@@ -1,9 +1,6 @@
 name: Release
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/release.yml"
   push:
     branches:
       - master
@@ -14,23 +11,6 @@ permissions:
   contents: read
 
 jobs:
-  check-release-credentials:
-    name: Check LuaRocks credentials
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check LuaRocks token
-        env:
-          LUAROCKS_TOKEN: ${{ secrets.LUAROCKS_TOKEN }}
-        shell: bash
-        run: |
-          if [[ -z "$LUAROCKS_TOKEN" ]]; then
-            echo "LUAROCKS_TOKEN is not configured for this repository"
-            exit 1
-          fi
-
   release:
     name: Release
     if: github.event_name == 'push'
