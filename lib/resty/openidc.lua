@@ -1887,6 +1887,10 @@ function openidc.introspect(opts)
     return nil, err
   end
 
+  if opts.introspection_cache_ignore then
+    return introspect_access_token(opts, access_token)
+  end
+
   -- avoid lock overhead for normal cache hits
   local value = get_cached_introspection(opts, access_token)
   if value then
