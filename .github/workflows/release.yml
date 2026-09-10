@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "rockspec/api7-lua-resty-openidc-*.rockspec"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Lua
+        uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: "5.1"
+
+      - name: Install LuaRocks
+        uses: leafo/gh-actions-luarocks@v6
+
+      - name: Extract release metadata
+        id: release
+        env:
+          RELEASE_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        shell: bash
+        run: |
+          if [[ "$RELEASE_COMMIT_MESSAGE" =~ ^feat:\ release\ v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            echo "The commit message must start with 'feat: release v<version>'"
+            exit 1
+          fi
+
+          rockspec="rockspec/api7-lua-resty-openidc-${version}-0.rockspec"
+          if [[ ! -f "$rockspec" ]]; then
+            echo "Missing release rockspec: $rockspec"
+            exit 1
+          fi
+
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          echo "rockspec=${rockspec}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate LuaRocks credentials
+        env:
+          LUAROCKS_TOKEN: ${{ secrets.LUAROCKS_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -z "$LUAROCKS_TOKEN" ]]; then
+            echo "LUAROCKS_TOKEN is not configured for this repository"
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+          fi
+
+      - name: Upload to LuaRocks
+        env:
+          LUAROCKS_TOKEN: ${{ secrets.LUAROCKS_TOKEN }}
+          ROCKSPEC: ${{ steps.release.outputs.rockspec }}
+        shell: bash
+        run: |
+          luarocks install dkjson
+          luarocks upload "$ROCKSPEC" --api-key="$LUAROCKS_TOKEN"
