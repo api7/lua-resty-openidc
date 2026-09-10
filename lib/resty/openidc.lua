@@ -447,7 +447,7 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
 
   local ep_name = endpoint_name or 'token'
   if not endpoint then
-    return nil, 'no endpoint URI for ' .. ep_name
+    return nil, 'no endpoint URI for ' .. ep_name, nil, "configuration_error"
   end
 
   local headers = {
@@ -475,7 +475,8 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
     elseif auth == "private_key_jwt" or auth == "client_secret_jwt" then
       local key = auth == "private_key_jwt" and opts.client_rsa_private_key or opts.client_secret
       if not key then
-        return nil, "Can't use " .. auth .. " without a key."
+        return nil, "Can't use " .. auth .. " without a key.", nil,
+          "configuration_error"
       end
       body.client_id = opts.client_id
       body.client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
@@ -533,12 +534,19 @@ function openidc.call_token_endpoint(opts, endpoint, body, auth, endpoint_name, 
   if not res then
     err = "accessing " .. ep_name .. " endpoint (" .. endpoint .. ") failed: " .. err
     log(ERROR, err)
-    return nil, err
+    return nil, err, nil, "endpoint_unavailable"
   end
 
   log(DEBUG, ep_name .. " endpoint response: ", res.body)
 
-  return openidc_parse_json_response(res, ignore_body_on_success)
+  local json
+  json, err = openidc_parse_json_response(res, ignore_body_on_success)
+  local failure_kind
+  if err then
+    failure_kind = res.status == ngx.HTTP_OK and
+      "invalid_response" or "endpoint_unavailable"
+  end
+  return json, err, res.status, failure_kind
 end
 
 -- computes access_token expires_in value (in seconds)
@@ -1780,6 +1788,13 @@ local function set_cached_introspection(opts, access_token, encoded_json, ttl)
   end
 end
 
+local function introspection_failure(kind, http_status)
+  return {
+    kind = kind,
+    http_status = http_status,
+  }
+end
+
 local function introspect_access_token(opts, access_token)
   -- assemble the parameters to the introspection (token) endpoint
   local token_param_name = opts.introspection_token_param_name and opts.introspection_token_param_name or "token"
@@ -1805,19 +1820,41 @@ local function introspect_access_token(opts, access_token)
   local err
   introspection_endpoint, err = get_introspection_endpoint(opts)
   if err then
-    return nil, err
+    local kind = type(opts.discovery) == "string" and
+      "endpoint_unavailable" or "configuration_error"
+    local http_status = kind == "endpoint_unavailable" and
+      ngx.HTTP_SERVICE_UNAVAILABLE or ngx.HTTP_INTERNAL_SERVER_ERROR
+    return nil, err, nil, introspection_failure(kind, http_status)
+  end
+  if not introspection_endpoint then
+    return nil, "no endpoint URI for introspection", nil,
+      introspection_failure("configuration_error", ngx.HTTP_INTERNAL_SERVER_ERROR)
   end
   local json
-  json, err = openidc.call_token_endpoint(opts, introspection_endpoint, body, opts.introspection_endpoint_auth_method, "introspection")
-
+  local endpoint_status
+  local failure_kind
+  json, err, endpoint_status, failure_kind = openidc.call_token_endpoint(
+    opts, introspection_endpoint, body,
+    opts.introspection_endpoint_auth_method, "introspection")
 
   if not json then
-    return json, err
+    local kind = failure_kind or "endpoint_unavailable"
+    local http_status = kind == "configuration_error" and
+      ngx.HTTP_INTERNAL_SERVER_ERROR or ngx.HTTP_SERVICE_UNAVAILABLE
+    return json, err, endpoint_status,
+      introspection_failure(kind, http_status)
   end
 
-  if not json.active then
+  if type(json.active) ~= "boolean" then
+    err = "introspection response active claim is not a boolean"
+    return json, err, endpoint_status,
+      introspection_failure("invalid_response", ngx.HTTP_SERVICE_UNAVAILABLE)
+  end
+
+  if json.active == false then
     err = "invalid token"
-    return json, err
+    return json, err, endpoint_status,
+      introspection_failure("invalid_token", ngx.HTTP_UNAUTHORIZED)
   end
 
   -- cache the results
@@ -1839,15 +1876,23 @@ local function introspect_access_token(opts, access_token)
     set_cached_introspection(opts, access_token, cjson.encode(json), ttl)
   end
 
-  return json, err
+  return json, err, endpoint_status
 end
 
 local function decode_cached_introspection(value)
-  local json = cjson.decode(value)
+  local json = cjson_s.decode(value)
   local err
 
-  if not json or not json.active then
+  if not json or type(json.active) ~= "boolean" then
+    err = "cached introspection response active claim is not a boolean"
+    return json, err, nil,
+      introspection_failure("invalid_response", ngx.HTTP_SERVICE_UNAVAILABLE)
+  end
+
+  if json.active == false then
     err = "invalid cached token"
+    return json, err, nil,
+      introspection_failure("invalid_token", ngx.HTTP_UNAUTHORIZED)
   end
 
   return json, err
@@ -1904,7 +1949,8 @@ function openidc.introspect(opts)
   -- get the access token from the request
   local access_token, err = openidc_get_bearer_access_token(opts)
   if access_token == nil then
-    return nil, err
+    return nil, err, nil,
+      introspection_failure("invalid_request", ngx.HTTP_UNAUTHORIZED)
   end
 
   if opts.introspection_cache_ignore then
@@ -1933,10 +1979,12 @@ function openidc.introspect(opts)
   local lock_exptime = opts.introspection_lock_exptime or 30
 
   if type(lock_timeout) ~= "number" or lock_timeout < 0 then
-    return nil, "introspection_lock_timeout must be a non-negative number"
+    return nil, "introspection_lock_timeout must be a non-negative number", nil,
+      introspection_failure("configuration_error", ngx.HTTP_INTERNAL_SERVER_ERROR)
   end
   if type(lock_exptime) ~= "number" or lock_exptime <= 0 then
-    return nil, "introspection_lock_exptime must be a positive number"
+    return nil, "introspection_lock_exptime must be a positive number", nil,
+      introspection_failure("configuration_error", ngx.HTTP_INTERNAL_SERVER_ERROR)
   end
 
   local locked
@@ -1944,7 +1992,8 @@ function openidc.introspect(opts)
   locked, err, observed_owner = acquire_introspection_lock(
     introspection_cache, lock_key, lock_owner, lock_timeout, lock_exptime)
   if not locked then
-    return nil, "failed to acquire introspection lock: " .. err
+    return nil, "failed to acquire introspection lock: " .. err, nil,
+      introspection_failure("coordination_failed", ngx.HTTP_SERVICE_UNAVAILABLE)
   end
 
   -- Another request may have populated the regular cache while this request
@@ -1967,12 +2016,15 @@ function openidc.introspect(opts)
         introspection_cache, result_key_prefix .. lock_owner,
         completed_value, math.max(lock_timeout, 1))
       release_introspection_lock(introspection_cache, lock_key, lock_owner)
-      return completed.json, completed.err
+      return completed.json, completed.err, completed.endpoint_status,
+        completed.failure
     end
   end
 
   local json
-  json, err = introspect_access_token(opts, access_token)
+  local endpoint_status
+  local failure
+  json, err, endpoint_status, failure = introspect_access_token(opts, access_token)
 
   -- A cacheable response is already visible to waiters. Publish only outcomes
   -- that the regular introspection cache did not retain.
@@ -1980,6 +2032,8 @@ function openidc.introspect(opts)
     local completed, encode_err = cjson_s.encode({
       json = json,
       err = err,
+      endpoint_status = endpoint_status,
+      failure = failure,
     })
     if completed then
       publish_introspection_result(
@@ -1991,7 +2045,7 @@ function openidc.introspect(opts)
   end
 
   release_introspection_lock(introspection_cache, lock_key, lock_owner)
-  return json, err
+  return json, err, endpoint_status, failure
 
 end
 

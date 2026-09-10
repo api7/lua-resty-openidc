@@ -3,6 +3,8 @@
   waiting requests to share successful and failed results
 - make introspection coordination honor explicit cache bypass and isolate
   temporary results and lock release by lock generation
+- return structured introspection failure details so callers can distinguish
+  invalid tokens from unavailable endpoints and internal failures
 
 09/13/204
 - cross-tenant requests are fixed with lua-resty session 4.0.x; closes #526
