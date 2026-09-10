@@ -1,6 +1,8 @@
 09/10/2026
 - coalesce concurrent introspection cache misses for the same token, allowing
   waiting requests to share successful and failed results
+- make introspection coordination honor explicit cache bypass and isolate
+  temporary results and lock release by lock generation
 
 09/13/204
 - cross-tenant requests are fixed with lua-resty session 4.0.x; closes #526
