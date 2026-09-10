@@ -7,6 +7,40 @@ local function assert_introspection_endpoint_call_contains(s, case_insensitive)
                              case_insensitive)
 end
 
+local function error_log_occurrences(s)
+  local count = 0
+  local pos = 1
+  local log = test_support.load("/tmp/server/logs/error.log")
+  while true do
+    pos = log:find(s, pos, true)
+    if not pos then
+      return count
+    end
+    count = count + 1
+    pos = pos + #s
+  end
+end
+
+local function request_introspection_concurrently(jwt, count, expected_status)
+  expected_status = expected_status or "200"
+  local output = "/tmp/introspection-statuses"
+  os.remove(output)
+  local command = "seq 1 " .. count .. " | xargs -P " .. count ..
+    " -I '{}' curl -sS -o /dev/null -w '%{http_code}\\n'" ..
+    " -H 'Authorization: Bearer " .. jwt .. "'" ..
+    " http://127.0.0.1/introspect > " .. output
+  local ok = os.execute(command)
+  assert.truthy(ok == true or ok == 0)
+
+  local statuses = test_support.load(output)
+  local seen = 0
+  for status in statuses:gmatch("%d+") do
+    assert.are.equals(expected_status, status)
+    seen = seen + 1
+  end
+  assert.are.equals(count, seen)
+end
+
 describe("when the introspection endpoint is invoked", function()
   test_support.start_server()
   teardown(test_support.stop_server)
@@ -370,7 +404,41 @@ describe("when the response is active but lacks the exp claim", function()
   end)
 end)
 
--- TODO find a way to assert caching
+describe("when a batch sends 35 concurrent requests with the same uncached token", function()
+  test_support.start_server({
+    delay_response = { introspection = 1000 },
+    introspection_opts = { introspection_cache_ignore = false },
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  request_introspection_concurrently(jwt, 35)
+
+  it("coalesces the batch into one introspection endpoint call", function()
+    assert.are.equals(1, error_log_occurrences("Received introspection request:"))
+  end)
+end)
+
+describe("when concurrent requests introspect a response without an expiry", function()
+  test_support.start_server({
+    delay_response = { introspection = 300 },
+    remove_introspection_claims = { "exp" },
+    introspection_opts = { introspection_cache_ignore = false },
+  })
+  teardown(test_support.stop_server)
+  local jwt = test_support.trim(http.request("http://127.0.0.1/jwt"))
+  request_introspection_concurrently(jwt, 20)
+
+  it("shares the in-flight response without caching it for later requests", function()
+    assert.are.equals(1, error_log_occurrences("Received introspection request:"))
+    os.execute("sleep 0.1")
+    local _, status = http.request({
+      url = "http://127.0.0.1/introspect",
+      headers = { authorization = "Bearer " .. jwt }
+    })
+    assert.are.equals(200, status)
+    assert.are.equals(2, error_log_occurrences("Received introspection request:"))
+  end)
+end)
 
 describe("when introspection endpoint is not resolvable", function()
   test_support.start_server({
@@ -564,4 +632,3 @@ describe("when introspection endpoint hasn't been specified but discovery doc pr
      assert.are.equals(200, status)
   end)
 end)
-
